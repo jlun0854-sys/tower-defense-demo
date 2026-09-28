@@ -58,7 +58,7 @@
     align-items: stretch;
   }
   #cards {
-    display: flex; gap: 5px; flex: 1 1 auto; min-width: 0;
+    display: flex; gap: 5px; flex: 1 1 auto; min-width: 0; min-height: 0;
     overflow-x: auto; overflow-y: hidden;
   }
   #cards::-webkit-scrollbar { height: 5px; }
@@ -182,7 +182,9 @@
     #next { padding: 3px 10px; }
   }
   /* ---------- 窄屏（手机竖屏）：保证每一样东西都看得见 ---------- */
-  @media (max-width: 820px) {
+  /* ---------- 窄屏（手机【竖屏】）：保证每一样东西都看得见 ----------
+     注意：加了 orientation: portrait，避免和下面的横屏规则同时命中而叠加 */
+  @media (max-width: 820px) and (orientation: portrait) {
     #hud { font-size: 11.5px; gap: 3px 5px; padding: 3px 6px; }
     .lbl { font-size: 10px; }
     .btn { padding: 2px 5px; font-size: 10.5px; border-radius: 5px; }
@@ -212,18 +214,22 @@
     .lbl { font-size: 9.5px; }
     .btn { padding: 2px 6px; font-size: 11px; border-radius: 5px; }
     #shop {
-      order: 2; flex: 0 0 140px; width: 140px;
-      flex-direction: column; gap: 5px; padding: 5px;
+      order: 2; flex: 0 0 150px; width: 150px;
+      flex-flow: column nowrap;     /* 关键：显式 nowrap，防止和竖屏的 wrap 叠加成 column wrap */
+      gap: 5px; padding: 5px;
       overflow: hidden;
       border: 1px solid #223046; border-left: none; border-top: none;
     }
     #cards {
-      flex-direction: column; gap: 4px; flex: 1 1 auto;
+      flex-flow: column nowrap; gap: 4px; flex: 1 1 auto; min-height: 0;
       overflow-x: hidden; overflow-y: auto;
     }
     #shop .card { width: 100%; padding: 5px 6px; }
     #shop .card .desc { display: none; }
     #next { width: 100%; flex: 0 0 auto; padding: 7px 6px; }
+    #next b { font-size: 12px; }
+    #next.ready b { font-size: 12.5px; }
+    #next span { font-size: 9.5px; }
     #board { border-radius: 0 0 0 8px; }
     #panel { width: 150px; padding: 7px 8px; font-size: 11px; }
   }
