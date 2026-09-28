@@ -75,6 +75,9 @@
   .card:hover { border-color: #3d5a80; background: #1e2b3d; }
   .card.sel { border-color: #4bb6ff; background: #14304a; box-shadow: 0 0 0 1px #4bb6ff55 inset; }
   .card.poor { opacity: .42; }
+  .card.special { border-color: #6b5a2a; background: #221d10; }
+  .card.special:hover { border-color: #d4a12a; background: #2e2614; }
+  .card.special .nm em { color: #ffd479; }
   .swatch { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; }
   .card .txt { min-width: 0; line-height: 1.25; }
   .card .nm { font-size: 12px; font-weight: 600; white-space: nowrap; }
@@ -272,6 +275,7 @@
     <button class="btn" id="b-zoom" title="点击恢复适应窗口">100%</button>
     <button class="btn" id="b-zoomin">＋</button>
     <button class="btn" id="b-best" title="查看历史最高记录">记录</button>
+    <button class="btn" id="b-score" title="金币超过 2000 的部分按 100:1 转成分数">自动换分</button>
     <button class="btn warn" id="b-reset">重开</button>
   </div>
   <div id="body">
@@ -476,6 +480,18 @@ const WAVE_GAP = TOUCH ? 6 : 3;               // 波次之间的间隔（秒）�
 const critChance = () => Math.min(CRIT_MAX, CRIT_BASE + (G ? G.wave : 0) * CRIT_GROW);
 const frenzyMul  = () => (G && G.wave >= FRENZY_WAVE) ? FRENZY_MULT : 1;
 
+/* ---- 后期经济：给花不完的金币找出口 ---- */
+// ① 超载核心：永久 +5% 全场伤害，价格每次 ×1.6 —— 无限的消耗口
+const CORE_BASE = 500, CORE_GROW = 1.6, CORE_BONUS = 0.05;
+const coreCost = () => Math.round(CORE_BASE * Math.pow(CORE_GROW, G.coreLevel));
+const coreMul  = () => 1 + CORE_BONUS * G.coreLevel;
+
+// ② 狂暴：花金币买 10 秒全场攻速 ×3
+const RAGE_COST = 5000, RAGE_TIME = 10, RAGE_CD = 30, RAGE_HASTE = 0.34;
+
+// ③ 自动换分：金币超过保留线，多出来的按比例转成分数
+const SCORE_KEEP = 2000, SCORE_RATE = 100, SCORE_SPEED = 3000;
+
 function towerStat(type, level, isSuper) {
   const t = TOWER_TYPES[type], k = level - 1;
   const s = {
@@ -493,6 +509,7 @@ function towerStat(type, level, isSuper) {
     if (s.chain) s.chain += 1;
     if (s.slow) s.slow = Math.min(0.72, s.slow * 1.2);
   }
+  s.dmg *= coreMul();                         // 超载核心的全局加成
   return s;
 }
 function upgradeCost(type, level) {
@@ -602,6 +619,7 @@ function newGame() {
     occupy: new Set(),
     spawnQueue: [], waveActive: false, waveTimer: 0, autoWave: false,
     time: 0, speed: 1, paused: false, over: false, autosave: 6,
+    coreLevel: 0, rageT: 0, rageCd: 0, autoScore: false, scoreFrac: 0,
     build: null, selected: null, hoverTile: null
   };
   selectedShop = null;
@@ -619,6 +637,7 @@ function serialize() {
     v: 1, time: Date.now(),
     life: G.life, maxLife: G.maxLife, gold: G.gold, score: G.score, wave: G.wave,
     autoWave: G.autoWave, speed: G.speed, waveActive: G.waveActive,
+    coreLevel: G.coreLevel, autoScore: G.autoScore,
     spawnQueue: G.spawnQueue.map(s => ({ type: s.type, delay: s.delay })),
     towers: G.towers.map(t => ({
       type: t.type, level: t.level, tx: t.tx, ty: t.ty,
@@ -646,6 +665,7 @@ function syncButtons() {
   ["b-s1", "b-s2", "b-s3"].forEach((id, i) =>
     document.getElementById(id).classList.toggle("on", i + 1 === G.speed));
   updateZoomLabel();
+  syncScoreBtn();
 }
 
 function loadSave(d) {
@@ -654,6 +674,8 @@ function loadSave(d) {
   G.score = d.score || 0; G.wave = d.wave || 0;
   G.autoWave = !!d.autoWave; G.speed = d.speed || 1;
   G.waveActive = !!d.waveActive;
+  G.coreLevel = d.coreLevel || 0; G.autoScore = !!d.autoScore;
+  G.rageT = 0; G.rageCd = 0; G.scoreFrac = 0;
   G.spawnQueue = (d.spawnQueue || []).map(s => ({ type: s.type, delay: s.delay }));
   G.towers = (d.towers || []).map(t => ({
     type: t.type, level: t.level, tx: t.tx, ty: t.ty, super: !!t.super,
@@ -873,6 +895,26 @@ function update(dt) {
   G.autosave -= dt;
   if (G.autosave <= 0) { G.autosave = 8; saveGame(true); }
 
+  /* 狂暴计时（只更新变化的那一格文字，避免每帧重建 DOM） */
+  if (G.rageT > 0) G.rageT -= dt;
+  if (G.rageCd > 0) G.rageCd -= dt;
+  const rageDesc = document.getElementById("rage-desc");
+  if (rageDesc) {
+    const t = G.rageT > 0 ? "生效中 " + G.rageT.toFixed(1) + "s"
+            : G.rageCd > 0 ? "冷却 " + Math.ceil(G.rageCd) + "s"
+            : "10 秒全场攻速 ×3";
+    if (rageDesc.textContent !== t) rageDesc.textContent = t;
+  }
+
+  /* 自动换分：把超出保留线的金币按 100:1 转成分数 */
+  if (G.autoScore && G.gold > SCORE_KEEP) {
+    const conv = Math.min(G.gold - SCORE_KEEP, SCORE_SPEED * dt);
+    G.gold -= conv;
+    G.scoreFrac = (G.scoreFrac || 0) + conv / SCORE_RATE;
+    const add = Math.floor(G.scoreFrac);
+    if (add > 0) { G.score += add; G.scoreFrac -= add; }
+  }
+
   if (!G.waveActive && G.autoWave && !G.over) {
     G.waveTimer -= dt;
     if (G.waveTimer <= 0) startWave();
@@ -928,7 +970,7 @@ function update(dt) {
           if (proj < 0 || proj > s.range) continue;
           const perp = Math.abs(px * dy - py * dx) / L;
           if (perp > s.beamWidth + e.r) continue;
-          damageEnemy(e, s.dmg * dt, def.pierceArmor);
+          damageEnemy(e, s.dmg * dt * (G.rageT > 0 ? 1 / RAGE_HASTE : 1), def.pierceArmor);
         }
       } else tw.beam = null;
       continue;
@@ -939,7 +981,7 @@ function update(dt) {
     tw.target = tgt;
     if (tgt && tw.cool <= 0) {
       fireTower(tw, tgt);
-      tw.cool = s.cd;
+      tw.cool = s.cd * (G.rageT > 0 ? RAGE_HASTE : 1);
       tw.recoil = 1;
     }
     if (tw.recoil > 0) tw.recoil = Math.max(0, tw.recoil - dt * 6);
@@ -1044,6 +1086,14 @@ function draw() {
   drawShots();
   drawParticles();
   drawFloats();
+
+  if (G.rageT > 0) {                       // 狂暴期间全场泛红脉动
+    ctx.save();
+    ctx.globalAlpha = 0.06 + Math.abs(Math.sin(G.time * 10)) * 0.05;
+    ctx.fillStyle = "#ff4d6a";
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
 }
 
 function drawGround() {
@@ -1383,6 +1433,46 @@ function renderShop() {
     };
     box.appendChild(el);
   }
+
+  /* ---- ① 超载核心：金币的无限出口（永久 +5% 伤害，价格 ×1.6 递增） ---- */
+  const cc = coreCost();
+  const coreEl = document.createElement("div");
+  coreEl.className = "card special" + (G.gold < cc ? " poor" : "");
+  coreEl.innerHTML =
+    '<div class="swatch" style="background:#ffd479"></div>' +
+    '<div class="txt"><div class="nm">超载核心 <em>' + cc + '</em></div>' +
+    '<div class="desc">Lv.' + G.coreLevel + ' · 全场伤害 +' + Math.round(G.coreLevel * CORE_BONUS * 100) + '%</div></div>';
+  coreEl.onclick = () => {
+    const c = coreCost();
+    if (G.gold < c) { tip("金币不够（需要 " + c + "）"); return; }
+    G.gold -= c; G.coreLevel++;
+    burst(W / 2, H / 2, "#ffd479", 34, 300);
+    floatText(W / 2, H / 2 - 34, "超载核心 Lv." + G.coreLevel, "#ffd479", 18);
+    updateHUD();
+  };
+  box.appendChild(coreEl);
+
+  /* ---- ② 狂暴：花金币买 10 秒爆发 ---- */
+  const rageReady = G.rageCd <= 0 && G.rageT <= 0;
+  const rageEl = document.createElement("div");
+  rageEl.className = "card special" +
+    ((G.rageT > 0 || (rageReady && G.gold >= RAGE_COST)) ? "" : " poor");
+  rageEl.innerHTML =
+    '<div class="swatch" style="background:#ff4d6a"></div>' +
+    '<div class="txt"><div class="nm">狂暴 ×3 <em>' + RAGE_COST + '</em></div>' +
+    '<div class="desc" id="rage-desc">' +
+      (G.rageT > 0 ? "生效中 " + G.rageT.toFixed(1) + "s"
+       : G.rageCd > 0 ? "冷却 " + Math.ceil(G.rageCd) + "s"
+       : "10 秒全场攻速 ×3") + '</div></div>';
+  rageEl.onclick = () => {
+    if (G.rageT > 0) { tip("狂暴已经在生效中"); return; }
+    if (G.rageCd > 0) { tip("冷却中，还需 " + Math.ceil(G.rageCd) + " 秒"); return; }
+    if (G.gold < RAGE_COST) { tip("金币不够（需要 " + RAGE_COST + "）"); return; }
+    G.gold -= RAGE_COST; G.rageT = RAGE_TIME; G.rageCd = RAGE_CD + RAGE_TIME;
+    floatText(W / 2, H / 2 - 34, "⚡ 狂暴！", "#ff6b8a", 24);
+    updateHUD();
+  };
+  box.appendChild(rageEl);
 }
 
 function updateNextBar() {
@@ -1631,6 +1721,21 @@ document.getElementById("b-best").onclick = () => {
       : "还没有记录，先打一局吧", true);
 };
 
+/* ③ 自动换分开关 */
+function syncScoreBtn() {
+  const b = document.getElementById("b-score");
+  if (!b) return;
+  b.textContent = G.autoScore ? "换分中 ✓" : "自动换分";
+  b.classList.toggle("on", G.autoScore);
+}
+document.getElementById("b-score").onclick = () => {
+  G.autoScore = !G.autoScore;
+  syncScoreBtn();
+  tip(G.autoScore
+      ? "金币超过 " + SCORE_KEEP + " 的部分会自动转分数"
+      : "已关闭自动换分", true);
+};
+
 /* 竖屏提示的"仍要竖屏玩" */
 const nrb = document.getElementById("b-norotate");
 if (nrb) nrb.onclick = () => { rotateDismissed = true; checkOrientation(); };
@@ -1651,6 +1756,7 @@ function resetAll() {
   setSpeed(1);
   const pb = document.getElementById("b-pause"); pb.textContent = "暂停"; pb.classList.remove("on");
   const ab = document.getElementById("b-auto"); ab.textContent = "自动开波"; ab.classList.remove("on");
+  syncScoreBtn();
 }
 document.getElementById("b-reset").onclick = resetAll;
 document.getElementById("b-again").onclick = resetAll;
